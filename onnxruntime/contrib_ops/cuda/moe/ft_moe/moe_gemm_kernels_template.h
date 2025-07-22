@@ -491,6 +491,10 @@ void MoeGemmRunner<T, WeightType>::moe_gemm_bias_act(const T* A, const WeightTyp
       run_gemm<EpilogueOpDefaultSilu>(A, B, weight_scales, biases, C, total_rows_before_expert, total_rows, gemm_n,
                                       gemm_k, num_experts, stream);
       break;
+    case ActivationType::SwiGLU:
+      run_gemm<EpilogueOpDefaultSwiGLU>(A, B, weight_scales, biases, C, total_rows_before_expert, total_rows, gemm_n,
+                                        gemm_k, num_experts, stream);
+      break;
     case ActivationType::Identity:
       run_gemm<EpilogueOpDefault>(A, B, weight_scales, biases, C, total_rows_before_expert, total_rows, gemm_n, gemm_k,
                                   num_experts, stream);

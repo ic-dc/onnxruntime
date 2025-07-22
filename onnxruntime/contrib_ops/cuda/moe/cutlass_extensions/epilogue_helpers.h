@@ -39,6 +39,8 @@ struct EpilogueOpBiasReLU {};
 
 struct EpilogueOpBiasFtGelu {};
 
+struct EpilogueOpDefaultSwiGLU {};
+
 struct EpilogueOpDefaultSilu {};
 
 struct EpilogueOpDefaultReLU {};
@@ -80,6 +82,143 @@ struct Epilogue<ElementType, ElementsPerVectorAccess, ElementAccumulator, Epilog
 };
 
 constexpr auto DefaultScaleMode = cutlass::epilogue::thread::ScaleType::Default;
+
+namespace epilogue {
+namespace thread {
+
+template <
+    typename ElementOutput_,
+    int ElementsPerAccess,
+    typename ElementAccumulator_ = ElementOutput_,
+    typename ElementCompute_ = ElementAccumulator_,
+    cutlass::epilogue::thread::ScaleType::Kind Scale = cutlass::epilogue::thread::ScaleType::Default,
+    cutlass::FloatRoundStyle Round = cutlass::FloatRoundStyle::round_to_nearest,
+    typename ElementSource_ = ElementOutput_>
+class LinearCombinationSwiGLU {
+ public:
+  using ElementOutput = ElementOutput_;
+  using ElementAccumulator = ElementAccumulator_;
+  using ElementSource = ElementSource_;
+  using ElementCompute = ElementCompute_;
+  static int const kElementsPerAccess = ElementsPerAccess;
+  static const cutlass::epilogue::thread::ScaleType::Kind kScale = Scale;
+  static const cutlass::FloatRoundStyle kRound = Round;
+
+  using FragmentAccumulator = cutlass::Array<ElementAccumulator, kElementsPerAccess>;
+  using FragmentSource = cutlass::Array<ElementSource, kElementsPerAccess>;
+  using FragmentOutput = cutlass::Array<ElementOutput, kElementsPerAccess>;
+  using ComputeFragment = cutlass::Array<ElementCompute, kElementsPerAccess>;
+
+  struct Params {
+    ElementCompute alpha;
+    ElementCompute beta;
+    ElementCompute const* alpha_ptr;
+    ElementCompute const* beta_ptr;
+
+    CUTLASS_HOST_DEVICE
+    Params() : alpha(1), beta(0), alpha_ptr(nullptr), beta_ptr(nullptr) {}
+
+    CUTLASS_HOST_DEVICE
+    Params(ElementCompute alpha, ElementCompute beta = ElementCompute(0)) : alpha(alpha), beta(beta), alpha_ptr(nullptr), beta_ptr(nullptr) {}
+
+    CUTLASS_HOST_DEVICE
+    Params(ElementCompute const* alpha_ptr, ElementCompute const* beta_ptr = nullptr) : alpha(1), beta(0), alpha_ptr(alpha_ptr), beta_ptr(beta_ptr) {}
+  };
+
+ private:
+  ElementCompute alpha_;
+  ElementCompute beta_;
+
+ public:
+  CUTLASS_HOST_DEVICE
+  LinearCombinationSwiGLU(Params const& params) {
+    alpha_ = (params.alpha_ptr ? *params.alpha_ptr : params.alpha);
+    beta_ = (params.beta_ptr ? *params.beta_ptr : params.beta);
+  }
+
+  CUTLASS_HOST_DEVICE
+  bool is_source_needed() const {
+    return beta_ != ElementCompute(0);
+  }
+
+  CUTLASS_HOST_DEVICE
+  FragmentOutput operator()(FragmentAccumulator const& accumulator, FragmentSource const& source) const {
+    cutlass::NumericArrayConverter<ElementCompute, ElementAccumulator, kElementsPerAccess> accumulator_converter;
+    cutlass::NumericArrayConverter<ElementCompute, ElementSource, kElementsPerAccess> source_converter;
+
+    ComputeFragment converted_acc = accumulator_converter(accumulator);
+    ComputeFragment converted_source = source_converter(source);
+
+    ComputeFragment intermediate;
+
+    CUTLASS_PRAGMA_UNROLL
+    for (int i = 0; i < kElementsPerAccess; ++i) {
+      intermediate[i] = alpha_ * converted_acc[i] + beta_ * converted_source[i];
+    }
+
+    // SwiGLU logic
+    ComputeFragment swiglu_result;
+    constexpr float swiglu_alpha = 1.702f;
+    CUTLASS_PRAGMA_UNROLL
+    for (int i = 0; i < kElementsPerAccess / 2; ++i) {
+      ElementCompute x_glu = intermediate[2 * i];
+      ElementCompute x_linear = intermediate[2 * i + 1];
+
+      ElementCompute sigmoid_arg = swiglu_alpha * x_glu;
+      ElementCompute sigmoid_out = (ElementCompute)1 / ((ElementCompute)1 + cutlass::fast_exp(-sigmoid_arg));
+
+      ElementCompute swish_out = x_glu * sigmoid_out;
+      swiglu_result[i] = swish_out * (x_linear + (ElementCompute)1);
+    }
+
+    CUTLASS_PRAGMA_UNROLL
+    for (int i = kElementsPerAccess / 2; i < kElementsPerAccess; ++i) {
+      swiglu_result[i] = ElementCompute(0);
+    }
+
+    cutlass::NumericArrayConverter<ElementOutput, ElementCompute, kElementsPerAccess> output_converter;
+    return output_converter(swiglu_result);
+  }
+
+  CUTLASS_HOST_DEVICE
+  FragmentOutput operator()(FragmentAccumulator const& accumulator) const {
+    cutlass::NumericArrayConverter<ElementCompute, ElementAccumulator, kElementsPerAccess> accumulator_converter;
+    ComputeFragment converted_acc = accumulator_converter(accumulator);
+
+    // SwiGLU logic
+    ComputeFragment swiglu_result;
+    constexpr float swiglu_alpha = 1.702f;
+    CUTLASS_PRAGMA_UNROLL
+    for (int i = 0; i < kElementsPerAccess / 2; ++i) {
+      ElementCompute x_glu = converted_acc[2 * i];
+      ElementCompute x_linear = converted_acc[2 * i + 1];
+
+      ElementCompute sigmoid_arg = swiglu_alpha * x_glu;
+      ElementCompute sigmoid_out = (ElementCompute)1 / ((ElementCompute)1 + cutlass::fast_exp(-sigmoid_arg));
+
+      ElementCompute swish_out = x_glu * sigmoid_out;
+      swiglu_result[i] = swish_out * (x_linear + (ElementCompute)1);
+    }
+
+    CUTLASS_PRAGMA_UNROLL
+    for (int i = kElementsPerAccess / 2; i < kElementsPerAccess; ++i) {
+      swiglu_result[i] = ElementCompute(0);
+    }
+
+    cutlass::NumericArrayConverter<ElementOutput, ElementCompute, kElementsPerAccess> output_converter;
+    return output_converter(swiglu_result);
+  }
+};
+
+}  // namespace thread
+}  // namespace epilogue
+
+template <typename ElementType, int ElementsPerVectorAccess, typename ElementAccumulator>
+struct Epilogue<ElementType, ElementsPerVectorAccess, ElementAccumulator, EpilogueOpDefaultSwiGLU> {
+  using Op = epilogue::thread::LinearCombinationSwiGLU<
+      ElementType, ElementsPerVectorAccess, ElementAccumulator, ElementAccumulator,
+      cutlass::epilogue::thread::ScaleType::Default, cutlass::FloatRoundStyle::round_to_nearest, ElementType>;
+};
 
 template <typename ElementType, int ElementsPerVectorAccess, typename ElementAccumulator>
 struct Epilogue<ElementType, ElementsPerVectorAccess, ElementAccumulator, EpilogueOpDefaultSilu> {

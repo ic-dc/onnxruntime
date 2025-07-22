@@ -880,39 +880,50 @@ void CutlassMoeFCRunner<T, WeightType, Enable>::run_moe_fc(
                          stream);
   }
 
-  // moe_gemm_runner_.try_find_best_config(local_num_experts, hidden_size, inter_size,
-  // expanded_active_expert_rows);
-  moe_gemm_runner_.moe_gemm_bias_act(
-      permuted_data_ + total_past_rows_ * hidden_size, fc1_expert_weights, fc1_scales, fc1_expert_biases,
-      fc1_result_ + total_past_rows_ * inter_size, total_rows_before_expert_ + local_experts_start_index,
-      expanded_active_expert_rows, inter_size, hidden_size, local_num_experts, fc1_activation_type, stream);
+  if (fc1_activation_type == ActivationType::SwiGLU) {
+    const int fc1_gemm_n = 2 * inter_size;
+    moe_gemm_runner_.moe_gemm_bias_act(
+        permuted_data_ + total_past_rows_ * hidden_size, fc1_expert_weights, fc1_scales, fc1_expert_biases,
+        fc1_result_ + total_past_rows_ * fc1_gemm_n, total_rows_before_expert_ + local_experts_start_index,
+        expanded_active_expert_rows, fc1_gemm_n, hidden_size, local_num_experts, fc1_activation_type, stream);
 
-  if (has_fc3_) {
-    if (scales_required) {
-      if (fc3_scales == nullptr) {
-        ORT_THROW("[Run MoE FC] Scales expected but scale for third matmul is a null pointer");
-      }
-    } else {
-      if (fc3_scales != nullptr) {
-        ORT_THROW("[Run MoE FC] Scales are ignored for fp32/fp16/bf16 but received scale for FC3");
-      }
-    }
-    if (fc3_expert_weights == nullptr) {
-      ORT_THROW("[Run MoE FC] FC3 weights are null");
-    }
-    moe_gemm_runner_.moe_gemm(permuted_data_ + total_past_rows_ * hidden_size, fc3_expert_weights, fc3_scales,
-                              fc3_expert_biases, fc3_result_ + total_past_rows_ * inter_size,
+    moe_gemm_runner_.moe_gemm(fc1_result_ + total_past_rows_ * fc1_gemm_n, fc2_expert_weights, fc2_scales, nullptr,
+                              fc2_result + total_past_rows_ * hidden_size,
                               total_rows_before_expert_ + local_experts_start_index, expanded_active_expert_rows,
-                              inter_size, hidden_size, local_num_experts, stream);
+                              hidden_size, inter_size, local_num_experts, stream);
+  } else {
+    moe_gemm_runner_.moe_gemm_bias_act(
+        permuted_data_ + total_past_rows_ * hidden_size, fc1_expert_weights, fc1_scales, fc1_expert_biases,
+        fc1_result_ + total_past_rows_ * inter_size, total_rows_before_expert_ + local_experts_start_index,
+        expanded_active_expert_rows, inter_size, hidden_size, local_num_experts, fc1_activation_type, stream);
 
-    elementWiseMul(fc1_result_ + total_past_rows_ * inter_size, fc3_result_ + total_past_rows_ * inter_size,
-                   static_cast<int>(inter_size), static_cast<int>(total_covered_rows_), stream);
+    if (has_fc3_) {
+      if (scales_required) {
+        if (fc3_scales == nullptr) {
+          ORT_THROW("[Run MoE FC] Scales expected but scale for third matmul is a null pointer");
+        }
+      } else {
+        if (fc3_scales != nullptr) {
+          ORT_THROW("[Run MoE FC] Scales are ignored for fp32/fp16/bf16 but received scale for FC3");
+        }
+      }
+      if (fc3_expert_weights == nullptr) {
+        ORT_THROW("[Run MoE FC] FC3 weights are null");
+      }
+      moe_gemm_runner_.moe_gemm(permuted_data_ + total_past_rows_ * hidden_size, fc3_expert_weights, fc3_scales,
+                                fc3_expert_biases, fc3_result_ + total_past_rows_ * inter_size,
+                                total_rows_before_expert_ + local_experts_start_index, expanded_active_expert_rows,
+                                inter_size, hidden_size, local_num_experts, stream);
+
+      elementWiseMul(fc1_result_ + total_past_rows_ * inter_size, fc3_result_ + total_past_rows_ * inter_size,
+                     static_cast<int>(inter_size), static_cast<int>(total_covered_rows_), stream);
+    }
+
+    moe_gemm_runner_.moe_gemm(fc1_result_ + total_past_rows_ * inter_size, fc2_expert_weights, fc2_scales, nullptr,
+                              fc2_result + total_past_rows_ * hidden_size,
+                              total_rows_before_expert_ + local_experts_start_index, expanded_active_expert_rows,
+                              hidden_size, inter_size, local_num_experts, stream);
   }
-
-  moe_gemm_runner_.moe_gemm(fc1_result_ + total_past_rows_ * inter_size, fc2_expert_weights, fc2_scales, nullptr,
-                            fc2_result + total_past_rows_ * hidden_size,
-                            total_rows_before_expert_ + local_experts_start_index, expanded_active_expert_rows,
-                            hidden_size, inter_size, local_num_experts, stream);
 }
 
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 700
