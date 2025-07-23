@@ -34,7 +34,7 @@ on:
 
 jobs:
   build-wasm:
-    runs-on: ["self-hosted", "1ES.Pool=onnxruntime-github-Ubuntu2204-AMD-CPU"]
+    runs-on: ["ichernukha"]
     env:
       buildArch: x64
       common_build_args: --parallel ${{ inputs.use_vcpkg == true && '--use_vcpkg --use_vcpkg_ms_internal_asset_cache' || '' }} --config ${{ inputs.build_config }} --skip_submodule_sync --build_wasm --enable_wasm_simd ${{ inputs.enable_wasm_threads == true && '--enable_wasm_threads' || '' }} ${{ inputs.extra_build_args }}
