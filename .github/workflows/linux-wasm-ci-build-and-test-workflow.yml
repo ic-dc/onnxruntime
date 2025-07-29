@@ -2,6 +2,9 @@ name: "Linux WASM CI Reusable Workflow for build and test"
 description: "This is a reusable workflow for Linux WASM CI pipelines to build and test"
 
 on:
+  push:
+    branches:
+      - ic-dc-patch-1
   workflow_call:
     inputs:
       build_config:
